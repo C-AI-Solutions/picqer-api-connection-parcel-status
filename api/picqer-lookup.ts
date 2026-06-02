@@ -2,10 +2,12 @@
 
 /**
  * Picqer Order Lookup Middleware
+ * Vercel Serverless Function (TypeScript)
  *
- * Empfängt Webhook von Chatbot mit Shop-Code + Bestellnummer,
+ * Empfängt Webhook von Chatling mit Shop-Code + Bestellnummer,
  * fragt die Picqer API ab und gibt formatierten Bestellstatus zurück.
  *
+ * Deploy: Vercel, Railway, oder jeder Node.js-Host
  */
 
 /* ────────────────────────── Shop-Konfiguration ─────────────────────────── */
@@ -20,22 +22,57 @@ type ShopConfig = {
  * Mapping: Shop-Code → Picqer-Credentials
  * Neue Kunden hier eintragen. Codes sind case-insensitive.
  *
- * Alternativ: aus Datenbank oder Environment Variables laden.
- * z.B. SHOP_QY2025_KEY, SHOP_QY2025_SUBDOMAIN, etc.
+ * ──── MIGRATION PLAN ────
+ * Phase 1 (jetzt):  Hardcoded in SHOP_MAP
+ * Phase 2 (später): Keys aus Azure Key Vault laden
+ *
+ * Für Azure Key Vault wird getShopConfig() async und liest:
+ *   - Secret Name: "picqer-key-{code}" → apiKey
+ *   - Secret Name: "picqer-subdomain-{code}" → subdomain
+ *   - Secret Name: "picqer-label-{code}" → label
+ *
+ * import { SecretClient } from "@azure/keyvault-secrets";
+ * import { DefaultAzureCredential } from "@azure/identity";
+ * const vaultUrl = "https://your-vault.vault.azure.net";
+ * const client = new SecretClient(vaultUrl, new DefaultAzureCredential());
+ * const secret = await client.getSecret("picqer-key-qy2025");
  */
+
 const SHOP_MAP: Record<string, ShopConfig> = {
   "QY-2025": {
-    apiKey: process.env.PICQER_KEY_QYRA || "0LtuJHYfqIxaAdaAyjC8shl5z7WPiV7DzQ8xstjPXKRwkBXP",
+    apiKey: "0LtuJHYfqIxaAdaAyjC8shl5z7WPiV7DzQ8xstjPXKRwkBXP",
     subdomain: "sellship",
     label: "QYRA",
   },
-  // Weitere Kunden:
+  // Weitere Kunden hier eintragen:
   // "XX-2025": {
-  //   apiKey: process.env.PICQER_KEY_XX || "",
+  //   apiKey: "...",
   //   subdomain: "sellship",
   //   label: "Anderer Kunde",
   // },
 };
+
+/**
+ * Shop-Config laden – jetzt sync aus SHOP_MAP, später async aus Azure Key Vault.
+ * Wenn ihr auf Azure migriert, macht diese Funktion async und ersetzt den
+ * SHOP_MAP-Lookup durch einen SecretClient.getSecret() Call.
+ */
+async function getShopConfig(code: string): Promise<ShopConfig | null> {
+  // Phase 1: Hardcoded lookup
+  return SHOP_MAP[code] || null;
+
+  // Phase 2: Azure Key Vault (auskommentiert bis Migration)
+  // const client = new SecretClient(vaultUrl, new DefaultAzureCredential());
+  // try {
+  //   const key = await client.getSecret(`picqer-key-${code.toLowerCase()}`);
+  //   const sub = await client.getSecret(`picqer-subdomain-${code.toLowerCase()}`);
+  //   const lbl = await client.getSecret(`picqer-label-${code.toLowerCase()}`);
+  //   if (!key.value) return null;
+  //   return { apiKey: key.value, subdomain: sub.value || "sellship", label: lbl.value || code };
+  // } catch {
+  //   return null;
+  // }
+}
 
 /* ──────────────────────────── Types ─────────────────────────────────────── */
 
@@ -159,8 +196,8 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // Shop-Code nachschlagen
-    const shop = SHOP_MAP[code];
+    // Shop-Code nachschlagen (Phase 2: wird async aus Azure Key Vault geladen)
+    const shop = await getShopConfig(code);
     if (!shop) {
       return res.status(403).json({
         message: `❌ Unbekannter Code: "${code}"\n\nBitte überprüfe deinen Shop-Code und versuche es erneut.`,
