@@ -125,7 +125,7 @@ type PicqerBackorder = {
   created_at: string;
 };
 
-const VERSION = "picqer-lookup-v3";
+const VERSION = "picqer-lookup-v4";
 
 /* ─────────────────────── Status-Übersetzungen ──────────────────────────── */
 
@@ -138,7 +138,7 @@ const ORDER_STATUS: Record<string, string> = {
   cancelled: "❌ Storniert",
 };
 
-const PICKLIST_STATUS: Record<string, string> = {
+const PICKLIST_STATUS_PICQER: Record<string, string> = {
   new: "🆕 Neu – wartet auf Picking",
   picking: "📋 Wird gerade gepickt",
   closed: "✅ Abgeschlossen & versandfertig",
@@ -147,58 +147,53 @@ const PICKLIST_STATUS: Record<string, string> = {
   paused: "⏸️ Pausiert",
 };
 
-/* ─────────────────── Status-Nachrichten (Platzhalter) ──────────────────── */
+/* ──────────────── Picklist-Status-Nachrichten (Platzhalter) ────────────── */
 
 /**
  * Hier die Texte für jede Statusmeldung anpassen.
- * Diese Texte werden als Variable "status_nachricht" an Chatling übergeben.
+ * Diese Texte werden als Variable "picklist_status_nachricht" an Chatling übergeben.
  * {datum} wird automatisch durch das Backorder-Datum ersetzt, falls vorhanden.
  */
-const STATUS_NACHRICHTEN = {
-  // ── Keine Picklist vorhanden ──
-  keine_picklist_backorder_mit_datum:
-    "Deine Bestellung wartet aktuell auf Ware vom Lieferanten. Voraussichtlich verfügbar am: {datum}. Sobald die Ware eingetroffen ist, wird deine Bestellung umgehend bearbeitet und versendet.",
-
-  keine_picklist_backorder_ohne_datum:
-    "Deine Bestellung wartet aktuell auf Ware vom Lieferanten. Ein genaues Verfügbarkeitsdatum liegt leider noch nicht vor. Wir informieren dich, sobald sich der Status ändert.",
-
-  keine_picklist_kein_backorder:
-    "Deine Bestellung wird gerade vorbereitet und in Kürze zur Kommissionierung freigegeben.",
-
-  // ── Picklist vorhanden ──
-  picklist_new:
-    "Deine Bestellung ist im Lager eingetroffen und wartet auf die Kommissionierung. Die Bearbeitung erfolgt in Kürze.",
-
-  picklist_picking:
-    "Gute Nachrichten! Deine Bestellung wird gerade im Lager zusammengestellt. Der Versand erfolgt voraussichtlich heute noch.",
-
-  picklist_snoozed:
-    "Die Bearbeitung deiner Bestellung wurde vorübergehend verschoben. Bei Fragen wende dich bitte an den Kundenservice.",
-
-  picklist_paused:
-    "Die Bearbeitung deiner Bestellung ist momentan pausiert. Bei Fragen wende dich bitte an den Kundenservice.",
-
-  picklist_closed_mit_shipment:
+const PICKLIST_STATUS_NACHRICHTEN: Record<string, string> = {
+  // ── picklist_status = "versendet" ──
+  versendet:
     "Deine Bestellung wurde erfolgreich versendet! Nutze den Tracking-Link, um dein Paket zu verfolgen.",
 
-  picklist_closed_ohne_shipment:
+  // ── picklist_status = "gepackt" ──
+  gepackt:
     "Deine Bestellung ist fertig gepackt und wird in Kürze an den Versanddienstleister übergeben.",
 
-  picklist_cancelled:
-    "Die Pickliste für diese Bestellung wurde storniert. Bei Fragen wende dich bitte an den Kundenservice.",
+  // ── picklist_status = "in_bearbeitung" ──
+  in_bearbeitung:
+    "Gute Nachrichten! Deine Bestellung wird gerade im Lager zusammengestellt. Der Versand erfolgt voraussichtlich heute noch.",
 
-  // ── Order-Level Status ──
-  order_completed:
-    "Deine Bestellung ist vollständig abgeschlossen und wurde erfolgreich zugestellt.",
+  // ── picklist_status = "wartend" ──
+  wartend:
+    "Deine Bestellung ist im Lager eingetroffen und wartet auf die Kommissionierung. Die Bearbeitung erfolgt in Kürze.",
 
-  order_cancelled:
+  // ── picklist_status = "backorder_mit_datum" ──
+  backorder_mit_datum:
+    "Deine Bestellung wartet aktuell auf Ware vom Lieferanten. Voraussichtlich verfügbar am: {datum}. Sobald die Ware eingetroffen ist, wird deine Bestellung umgehend bearbeitet und versendet.",
+
+  // ── picklist_status = "backorder_ohne_datum" ──
+  backorder_ohne_datum:
+    "Deine Bestellung wartet aktuell auf Ware vom Lieferanten. Ein genaues Verfügbarkeitsdatum liegt leider noch nicht vor. Wir informieren dich, sobald sich der Status ändert.",
+
+  // ── picklist_status = "pausiert" ──
+  pausiert:
+    "Die Bearbeitung deiner Bestellung ist momentan pausiert. Bei Fragen wende dich bitte an den Kundenservice.",
+
+  // ── picklist_status = "storniert" ──
+  storniert:
     "Diese Bestellung wurde storniert. Bei Fragen wende dich bitte an den Kundenservice.",
 
-  order_concept:
-    "Deine Bestellung befindet sich noch im Entwurfsstatus und wurde noch nicht zur Bearbeitung freigegeben.",
+  // ── picklist_status = "vorbereitung" ──
+  vorbereitung:
+    "Deine Bestellung wird gerade vorbereitet und in Kürze zur Kommissionierung freigegeben.",
 
-  order_expected:
-    "Deine Bestellung ist eingegangen und wird in Kürze verarbeitet.",
+  // ── picklist_status = "abgeschlossen" ──
+  abgeschlossen:
+    "Deine Bestellung ist vollständig abgeschlossen und wurde erfolgreich zugestellt.",
 };
 
 /* ──────────────────────────── Handler ───────────────────────────────────── */
@@ -302,7 +297,6 @@ export default async function handler(req: any, res: any) {
           .filter((d): d is string => d !== null && d !== "");
 
         if (datesAvailable.length > 0) {
-          // Sortieren und das späteste Datum nehmen
           datesAvailable.sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
           backorderDatum = formatDateShort(datesAvailable[0]);
         }
@@ -311,12 +305,16 @@ export default async function handler(req: any, res: any) {
       // Backorder-Endpoint nicht verfügbar (z.B. bei Fulfilment-Keys)
     }
 
-    /* ── 4) Status-Nachricht ermitteln ────────────────────────────────── */
+    /* ── 4) picklist_status + picklist_status_nachricht ermitteln ──────── */
 
-    const statusNachricht = getStatusNachricht(
+    const activeShipment = shipments.find((s) => !s.cancelled) || null;
+    const firstParcel = activeShipment?.parcels?.[0] || null;
+    const pl = order.picklists?.[0] || null;
+
+    const { picklistStatus, picklistStatusNachricht } = getPicklistStatus(
       order,
-      order.picklists?.[0] || null,
-      shipments,
+      pl,
+      activeShipment,
       backorders,
       backorderDatum
     );
@@ -331,13 +329,6 @@ export default async function handler(req: any, res: any) {
         return `${p.amount}× ${p.name}${cancelled}`;
       })
       .join("\n");
-
-    // Erste Picklist (Hauptfall)
-    const pl = order.picklists?.[0] || null;
-
-    // Erstes aktives Shipment + Parcel
-    const activeShipment = shipments.find((s) => !s.cancelled) || null;
-    const firstParcel = activeShipment?.parcels?.[0] || null;
 
     const response: Record<string, any> = {
       // ── Bestellung ──
@@ -355,9 +346,11 @@ export default async function handler(req: any, res: any) {
       produkte_anzahl: mainProducts.length,
       produkte_liste: produkteListe || "Keine Produkte",
 
-      // ── Pickliste ──
+      // ── Pickliste (Flow-Steuerung für Chatling if-else) ──
+      picklist_status: picklistStatus,
+      picklist_status_nachricht: picklistStatusNachricht,
+      picklist_status_picqer: pl ? (PICKLIST_STATUS_PICQER[pl.status] || pl.status) : "Noch nicht erstellt",
       picklist_id: pl?.picklistid || "",
-      picklist_status: pl ? (PICKLIST_STATUS[pl.status] || pl.status) : "Noch nicht erstellt",
       produkte_gepickt: pl?.totalpicked ?? "",
       produkte_gesamt: pl?.totalproducts ?? "",
       picklist_abgeschlossen: pl?.closed_at ? formatDate(pl.closed_at) : "",
@@ -375,9 +368,6 @@ export default async function handler(req: any, res: any) {
       backorder_anzahl: backorders.length,
       backorder_datum: backorderDatum,
 
-      // ── Status-Nachricht (dynamisch je nach Gesamtstatus) ──
-      status_nachricht: statusNachricht,
-
       // ── Meta ──
       public_status_page: order.public_status_page || "",
       message: formatMessage(order, shipments, shop.label),
@@ -394,70 +384,105 @@ export default async function handler(req: any, res: any) {
   }
 }
 
-/* ──────────────────── Status-Nachricht ermitteln ───────────────────────── */
+/* ──────────── picklist_status + picklist_status_nachricht ─────────────── */
 
-function getStatusNachricht(
+function getPicklistStatus(
   order: PicqerOrder,
   picklist: PicqerPicklist | null,
-  shipments: PicqerShipment[],
+  activeShipment: PicqerShipment | null,
   backorders: PicqerBackorder[],
   backorderDatum: string
-): string {
-  const activeShipment = shipments.find((s) => !s.cancelled);
+): { picklistStatus: string; picklistStatusNachricht: string } {
 
   // ── 1) Order-Level Status zuerst prüfen ──
+
   if (order.status === "cancelled") {
-    return STATUS_NACHRICHTEN.order_cancelled;
-  }
-
-  if (order.status === "concept") {
-    return STATUS_NACHRICHTEN.order_concept;
-  }
-
-  if (order.status === "expected") {
-    return STATUS_NACHRICHTEN.order_expected;
+    return {
+      picklistStatus: "storniert",
+      picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.storniert,
+    };
   }
 
   if (order.status === "completed" && !picklist) {
-    return STATUS_NACHRICHTEN.order_completed;
+    return {
+      picklistStatus: "abgeschlossen",
+      picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.abgeschlossen,
+    };
+  }
+
+  if (order.status === "concept" || order.status === "expected") {
+    return {
+      picklistStatus: "vorbereitung",
+      picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.vorbereitung,
+    };
   }
 
   // ── 2) Keine Picklist vorhanden ──
+
   if (!picklist) {
     if (backorders.length > 0) {
       if (backorderDatum) {
-        return STATUS_NACHRICHTEN.keine_picklist_backorder_mit_datum.replace("{datum}", backorderDatum);
+        return {
+          picklistStatus: "backorder_mit_datum",
+          picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.backorder_mit_datum.replace("{datum}", backorderDatum),
+        };
       }
-      return STATUS_NACHRICHTEN.keine_picklist_backorder_ohne_datum;
+      return {
+        picklistStatus: "backorder_ohne_datum",
+        picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.backorder_ohne_datum,
+      };
     }
-    return STATUS_NACHRICHTEN.keine_picklist_kein_backorder;
+    return {
+      picklistStatus: "vorbereitung",
+      picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.vorbereitung,
+    };
   }
 
   // ── 3) Picklist vorhanden – Status auswerten ──
+
   switch (picklist.status) {
     case "new":
-      return STATUS_NACHRICHTEN.picklist_new;
+      return {
+        picklistStatus: "wartend",
+        picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.wartend,
+      };
 
     case "picking":
-      return STATUS_NACHRICHTEN.picklist_picking;
+      return {
+        picklistStatus: "in_bearbeitung",
+        picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.in_bearbeitung,
+      };
 
     case "snoozed":
-      return STATUS_NACHRICHTEN.picklist_snoozed;
-
     case "paused":
-      return STATUS_NACHRICHTEN.picklist_paused;
+      return {
+        picklistStatus: "pausiert",
+        picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.pausiert,
+      };
 
     case "closed":
       if (activeShipment) {
-        return STATUS_NACHRICHTEN.picklist_closed_mit_shipment;
+        return {
+          picklistStatus: "versendet",
+          picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.versendet,
+        };
       }
-      return STATUS_NACHRICHTEN.picklist_closed_ohne_shipment;
+      return {
+        picklistStatus: "gepackt",
+        picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.gepackt,
+      };
 
     case "cancelled":
-      return STATUS_NACHRICHTEN.picklist_cancelled;
+      return {
+        picklistStatus: "storniert",
+        picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.storniert,
+      };
 
     default:
-      return STATUS_NACHRICHTEN.keine_picklist_kein_backorder;
+      return {
+        picklistStatus: "vorbereitung",
+        picklistStatusNachricht: PICKLIST_STATUS_NACHRICHTEN.vorbereitung,
+      };
   }
 }
 
