@@ -37,7 +37,6 @@ jobs:
           zip -r deploy.zip . \
             --exclude "*.git*" \
             --exclude ".github/*" \
-            --exclude "node_modules/*" \
             --exclude "deploy.zip"
 
       - name: Login to Azure
