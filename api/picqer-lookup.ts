@@ -21,19 +21,25 @@ type ShopConfig = {
 /**
  * Mapping: Shop-Code → Picqer-Credentials
  *
- * Phase 1 (jetzt):  Hardcoded in SHOP_MAP
- * Phase 2 (später): Keys aus Azure Key Vault laden
+ * Credentials are loaded from Azure Function App Settings at runtime.
+ * For multiple shops, set PICQER_SHOPS_JSON with a JSON object.
  */
-const SHOP_MAP: Record<string, ShopConfig> = {
-  "QY-2025": {
-    apiKey: "0LtuJHYfqIxaAdaAyjC8shl5z7WPiV7DzQ8xstjPXKRwkBXP",
-    subdomain: "sellship",
-    label: "QYRA",
-  },
-};
+function getShopConfig(code: string): ShopConfig | null {
+  const shopsFromEnv = process.env.PICQER_SHOPS_JSON
+    ? (JSON.parse(process.env.PICQER_SHOPS_JSON) as Record<string, ShopConfig>)
+    : null;
 
-async function getShopConfig(code: string): Promise<ShopConfig | null> {
-  return SHOP_MAP[code] || null;
+  const shopMap = shopsFromEnv && Object.keys(shopsFromEnv).length > 0
+    ? shopsFromEnv
+    : {
+        "QY-2025": {
+          apiKey: process.env.PICQER_API_KEY || "",
+          subdomain: process.env.PICQER_SUBDOMAIN || "sellship",
+          label: process.env.PICQER_LABEL || "QYRA",
+        },
+      };
+
+  return shopMap[code.trim().toUpperCase()] || null;
 }
 
 /* ──────────────────────────── Types ─────────────────────────────────────── */

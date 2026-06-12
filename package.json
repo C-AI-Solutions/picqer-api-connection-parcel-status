@@ -1,0 +1,20 @@
+{
+  "name": "picqer-api-connection-parcel-status",
+  "version": "1.0.0",
+  "description": "Azure Function for Picqer order lookup",
+  "scripts": {
+    "build": "tsc",
+    "start": "func start",
+    "prestart": "npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  }
+}
