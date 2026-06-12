@@ -1,0 +1,11 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "PICQER_API_KEY": "<your-picqer-api-key>",
+    "PICQER_SUBDOMAIN": "sellship",
+    "PICQER_LABEL": "QYRA",
+    "PICQER_SHOPS_JSON": ""
+  }
+}
