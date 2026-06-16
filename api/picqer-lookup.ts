@@ -2,13 +2,11 @@
 
 /**
  * Picqer Order Lookup Middleware
- * Vercel Serverless Function (TypeScript)
+ * Azure Function (TypeScript)
  *
- * Empfängt Webhook von Chatling mit Shop-Code + Bestellnummer,
+ * Empfängt Webhook mit Shop-Code + Bestellnummer,
  * fragt die Picqer API ab, und bei versendeten Bestellungen
  * zusätzlich die DHL Tracking API für detaillierten Versandstatus.
- *
- * Deploy: Vercel, Railway, oder jeder Node.js-Host
  */
 
 /* ────────────────────────── Shop-Konfiguration ─────────────────────────── */
@@ -37,7 +35,7 @@ const SHOP_MAP: Record<string, ShopConfig> = {
  * DHL Tracking API Credentials
  * API Docs: https://developer.dhl.com/api-reference/shipment-tracking
  */
-const DHL_API_KEY = "YANVPzuegvLGQdWil99mqrkYPc6nXrbr";
+const DHL_API_KEY = "SZVYQcHgrvd7oGnKhO3wGs7FhZ6vlSX8";
 const DHL_API_BASE = "https://api-eu.dhl.com/track/shipments";
 
 async function getShopConfig(code: string): Promise<ShopConfig | null> {
@@ -144,7 +142,7 @@ type DhlTrackingResult = {
   dhl_verfuegbar: boolean;
 };
 
-const VERSION = "picqer-lookup-v5";
+const VERSION = "picqer-lookup-v6";
 
 /* ─────────────────────── Status-Übersetzungen ──────────────────────────── */
 
@@ -344,15 +342,20 @@ export default async function handler(req: any, res: any) {
       dhl_verfuegbar: false,
     };
 
+    let dhl_debug = "";
+
     if (picklistStatus === "versendet" && firstParcel?.tracking_code) {
       try {
         dhlTracking = await fetchDhlTracking(
           firstParcel.tracking_code,
           order.deliveryzipcode
         );
-      } catch {
-        // DHL API nicht erreichbar – kein Problem, Picqer-Daten reichen
+        dhl_debug = dhlTracking.dhl_verfuegbar ? "OK" : "Keine Daten von DHL";
+      } catch (err: any) {
+        dhl_debug = `DHL Fehler: ${err?.message || String(err)}`;
       }
+    } else {
+      dhl_debug = `Kein DHL-Call: status=${picklistStatus}, tracking=${firstParcel?.tracking_code || "leer"}`;
     }
 
     /* ── 6) Flache Response bauen ─────────────────────────────────────── */
@@ -382,7 +385,7 @@ export default async function handler(req: any, res: any) {
       produkte_anzahl: mainProducts.length,
       produkte_liste: produkteListe || "Keine Produkte",
 
-      // ── Pickliste (Flow-Steuerung für Chatling if-else) ──
+      // ── Pickliste (Flow-Steuerung für if-else) ──
       picklist_status: picklistStatus,
       picklist_status_nachricht: picklistStatusNachricht,
       picklist_status_picqer: pl ? (PICKLIST_STATUS_PICQER[pl.status] || pl.status) : "Noch nicht erstellt",
@@ -408,6 +411,7 @@ export default async function handler(req: any, res: any) {
       dhl_letztes_event: dhlTracking.dhl_letztes_event,
       dhl_events: dhlTracking.dhl_events,
       dhl_verfuegbar: dhlTracking.dhl_verfuegbar,
+      dhl_debug: dhl_debug,
 
       // ── Backorder ──
       backorder_vorhanden: backorders.length > 0,
@@ -462,7 +466,8 @@ async function fetchDhlTracking(
   });
 
   if (!resp.ok) {
-    return empty;
+    const errorText = await resp.text();
+    throw new Error(`DHL API ${resp.status}: ${errorText.substring(0, 200)}`);
   }
 
   const data = await resp.json();
