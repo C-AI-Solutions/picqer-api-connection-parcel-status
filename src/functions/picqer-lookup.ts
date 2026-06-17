@@ -454,7 +454,7 @@ async function fetchDhlTracking(
     throw new Error(`DHL API ${resp.status}: ${errorText.substring(0, 200)}`);
   }
 
-  const data = await resp.json();
+  const data = (await resp.json()) as any;
   const shipment = data?.shipments?.[0];
 
   if (!shipment) {
