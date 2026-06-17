@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 
-const VERSION = "picqer-lookup-azure-v1";
+const VERSION = "picqer-lookup-azure-v2";
 
 /* ────────────────────────── Shop-Konfiguration ─────────────────────────── */
 
@@ -27,6 +27,13 @@ function getShopConfig(code: string): ShopConfig | null {
 
   return shopMap[code.trim().toUpperCase()] || null;
 }
+
+/**
+ * DHL Tracking API Credentials
+ * API Docs: https://developer.dhl.com/api-reference/shipment-tracking
+ */
+const DHL_API_KEY = process.env.DHL_API_KEY || "SZVYQcHgrvd7oGnKhO3wGs7FhZ6vlSX8";
+const DHL_API_BASE = "https://api-eu.dhl.com/track/shipments";
 
 /* ──────────────────────────── Types ─────────────────────────────────────── */
 
@@ -117,6 +124,17 @@ type PicqerBackorder = {
   created_at: string;
 };
 
+type DhlTrackingResult = {
+  dhl_status: string;
+  dhl_status_code: string;
+  dhl_status_ort: string;
+  dhl_status_zeit: string;
+  dhl_lieferzeit: string;
+  dhl_letztes_event: string;
+  dhl_events: string;
+  dhl_verfuegbar: boolean;
+};
+
 /* ─────────────────────── Status-Übersetzungen ──────────────────────────── */
 
 const ORDER_STATUS: Record<string, string> = {
@@ -158,6 +176,16 @@ const PICKLIST_STATUS_NACHRICHTEN: Record<string, string> = {
     "Deine Bestellung wird gerade vorbereitet und in Kürze zur Kommissionierung freigegeben.",
   abgeschlossen:
     "Deine Bestellung ist vollständig abgeschlossen und wurde erfolgreich zugestellt.",
+};
+
+/* ─────────────────── DHL Status-Übersetzungen ──────────────────────────── */
+
+const DHL_STATUS_MAP: Record<string, string> = {
+  "pre-transit": "📋 Sendungsdaten übermittelt",
+  transit: "🚚 Sendung unterwegs",
+  delivered: "✅ Zugestellt",
+  failure: "⚠️ Zustellversuch fehlgeschlagen",
+  unknown: "❓ Status unbekannt",
 };
 
 /* ----------------------------- CORS -------------------------------------- */
@@ -295,7 +323,36 @@ app.http("picqer-lookup", {
         order, pl, activeShipment, backorders, backorderDatum
       );
 
-      /* ── 5) Response bauen ───────────────────────────────────────────── */
+      /* ── 5) DHL Tracking abrufen (nur wenn versendet + Sendungsnr.) ── */
+
+      let dhlTracking: DhlTrackingResult = {
+        dhl_status: "",
+        dhl_status_code: "",
+        dhl_status_ort: "",
+        dhl_status_zeit: "",
+        dhl_lieferzeit: "",
+        dhl_letztes_event: "",
+        dhl_events: "",
+        dhl_verfuegbar: false,
+      };
+
+      let dhl_debug = "";
+
+      if (picklistStatus === "versendet" && firstParcel?.tracking_code) {
+        try {
+          dhlTracking = await fetchDhlTracking(
+            firstParcel.tracking_code,
+            order.deliveryzipcode
+          );
+          dhl_debug = dhlTracking.dhl_verfuegbar ? "OK" : "Keine Daten von DHL";
+        } catch (err: any) {
+          dhl_debug = `DHL Fehler: ${err?.message || String(err)}`;
+        }
+      } else {
+        dhl_debug = `Kein DHL-Call: status=${picklistStatus}, tracking=${firstParcel?.tracking_code || "leer"}`;
+      }
+
+      /* ── 6) Response bauen ───────────────────────────────────────────── */
 
       const mainProducts = order.products?.filter((p) => !p.partof_idorder_product) || [];
       const produkteListe = mainProducts
@@ -335,6 +392,15 @@ app.http("picqer-lookup", {
           versendet_am:               activeShipment ? formatDate(activeShipment.created) : "",
           gewicht:                    activeShipment?.weight ? `${activeShipment.weight}g` : "",
           versand_storniert:          activeShipment?.cancelled ?? false,
+          dhl_status:                 dhlTracking.dhl_status,
+          dhl_status_code:            dhlTracking.dhl_status_code,
+          dhl_status_ort:             dhlTracking.dhl_status_ort,
+          dhl_status_zeit:            dhlTracking.dhl_status_zeit,
+          dhl_lieferzeit:             dhlTracking.dhl_lieferzeit,
+          dhl_letztes_event:          dhlTracking.dhl_letztes_event,
+          dhl_events:                 dhlTracking.dhl_events,
+          dhl_verfuegbar:             dhlTracking.dhl_verfuegbar,
+          dhl_debug:                  dhl_debug,
           backorder_vorhanden:        backorders.length > 0,
           backorder_anzahl:           backorders.length,
           backorder_datum:            backorderDatum,
@@ -352,6 +418,89 @@ app.http("picqer-lookup", {
     }
   },
 });
+
+/* ──────────────────── DHL Tracking API ──────────────────────────────────── */
+
+async function fetchDhlTracking(
+  trackingCode: string,
+  recipientPostalCode?: string
+): Promise<DhlTrackingResult> {
+  const empty: DhlTrackingResult = {
+    dhl_status: "",
+    dhl_status_code: "",
+    dhl_status_ort: "",
+    dhl_status_zeit: "",
+    dhl_lieferzeit: "",
+    dhl_letztes_event: "",
+    dhl_events: "",
+    dhl_verfuegbar: false,
+  };
+
+  let url = `${DHL_API_BASE}?trackingNumber=${encodeURIComponent(trackingCode)}&language=de`;
+  if (recipientPostalCode) {
+    url += `&recipientPostalCode=${encodeURIComponent(recipientPostalCode)}`;
+  }
+
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      "DHL-API-Key": DHL_API_KEY,
+      Accept: "application/json",
+    },
+  });
+
+  if (!resp.ok) {
+    const errorText = await resp.text();
+    throw new Error(`DHL API ${resp.status}: ${errorText.substring(0, 200)}`);
+  }
+
+  const data = await resp.json();
+  const shipment = data?.shipments?.[0];
+
+  if (!shipment) {
+    return empty;
+  }
+
+  const statusCode = shipment.status?.statusCode || "";
+  const statusLabel = DHL_STATUS_MAP[statusCode] || shipment.status?.status || statusCode;
+  const statusDescription = shipment.status?.description || shipment.status?.status || "";
+  const statusOrt = shipment.status?.location?.address?.addressLocality || "";
+  const statusZeit = shipment.status?.timestamp
+    ? formatDate(shipment.status.timestamp)
+    : "";
+
+  let lieferzeit = "";
+  if (shipment.estimatedTimeOfDelivery?.date) {
+    lieferzeit = formatDateShort(shipment.estimatedTimeOfDelivery.date);
+    if (shipment.estimatedTimeOfDelivery.estimatedTimeOfDeliveryRemark) {
+      lieferzeit += ` (${shipment.estimatedTimeOfDelivery.estimatedTimeOfDeliveryRemark})`;
+    }
+  }
+
+  let eventsText = "";
+  if (Array.isArray(shipment.events) && shipment.events.length > 0) {
+    const recentEvents = shipment.events.slice(0, 5);
+    eventsText = recentEvents
+      .map((ev: any) => {
+        const zeit = ev.timestamp ? formatDate(ev.timestamp) : "";
+        const ort = ev.location?.address?.addressLocality || "";
+        const beschreibung = ev.description || ev.status || "";
+        return `${zeit}${ort ? ` – ${ort}` : ""}: ${beschreibung}`;
+      })
+      .join("\n");
+  }
+
+  return {
+    dhl_status: statusLabel,
+    dhl_status_code: statusCode,
+    dhl_status_ort: statusOrt,
+    dhl_status_zeit: statusZeit,
+    dhl_lieferzeit: lieferzeit,
+    dhl_letztes_event: statusDescription,
+    dhl_events: eventsText,
+    dhl_verfuegbar: true,
+  };
+}
 
 /* ──────────── picklist_status + picklist_status_nachricht ─────────────── */
 
@@ -435,7 +584,7 @@ async function picqerGet<T>(endpoint: string, shop: ShopConfig): Promise<T> {
     method: "GET",
     headers: {
       Authorization: "Basic " + Buffer.from(shop.apiKey + ":").toString("base64"),
-      "User-Agent": "ChatlinkBot (chatlink.com)",
+      "User-Agent": "SellshipMiddleware",
       Accept: "application/json",
     },
   });
@@ -452,12 +601,12 @@ async function picqerGet<T>(endpoint: string, shop: ShopConfig): Promise<T> {
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return "";
-  const d = new Date(dateStr.replace(" ", "T") + "Z");
+  const d = new Date(dateStr.replace(" ", "T") + (dateStr.includes("+") || dateStr.includes("Z") ? "" : "Z"));
   return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function formatDateShort(dateStr: string | null): string {
   if (!dateStr) return "";
-  const d = new Date(dateStr.replace(" ", "T") + "Z");
+  const d = new Date(dateStr.replace(" ", "T") + (dateStr.includes("+") || dateStr.includes("Z") ? "" : "Z"));
   return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
