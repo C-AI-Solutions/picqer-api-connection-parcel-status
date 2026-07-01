@@ -1,19 +1,11 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 
-const VERSION = "picqer-lookup-azure-v3";
+const VERSION = "picqer-lookup-azure-v4";
 
 /* ────────────────────────── Picqer-Konfiguration ───────────────────────── */
 
-const PICQER_API_KEY =
-  process.env.PICQER_API_KEY || "3HMQdsT8FiKlYuOJ5UmBbM1DcRyXb9WKQZ2d41nuKd1Dj82I";
+const PICQER_API_KEY = process.env.PICQER_API_KEY || "";
 const PICQER_SUBDOMAIN = process.env.PICQER_SUBDOMAIN || "sellship";
-
-/**
- * DHL Tracking API Credentials
- * API Docs: https://developer.dhl.com/api-reference/shipment-tracking
- */
-const DHL_API_KEY = process.env.DHL_API_KEY || "SZVYQcHgrvd7oGnKhO3wGs7FhZ6vlSX8";
-const DHL_API_BASE = "https://api-eu.dhl.com/track/shipments";
 
 /* ──────────────────────────── Types ─────────────────────────────────────── */
 
@@ -105,17 +97,6 @@ type PicqerBackorder = {
   created_at: string;
 };
 
-type DhlTrackingResult = {
-  dhl_status: string;
-  dhl_status_code: string;
-  dhl_status_ort: string;
-  dhl_status_zeit: string;
-  dhl_lieferzeit: string;
-  dhl_letztes_event: string;
-  dhl_events: string;
-  dhl_verfuegbar: boolean;
-};
-
 /* ─────────────────────── Status-Übersetzungen ──────────────────────────── */
 
 const ORDER_STATUS: Record<string, string> = {
@@ -159,16 +140,6 @@ const PICKLIST_STATUS_NACHRICHTEN: Record<string, string> = {
     "Deine Bestellung ist vollständig abgeschlossen und wurde erfolgreich zugestellt.",
 };
 
-/* ─────────────────── DHL Status-Übersetzungen ──────────────────────────── */
-
-const DHL_STATUS_MAP: Record<string, string> = {
-  "pre-transit": "📋 Sendungsdaten übermittelt",
-  transit: "🚚 Sendung unterwegs",
-  delivered: "✅ Zugestellt",
-  failure: "⚠️ Zustellversuch fehlgeschlagen",
-  unknown: "❓ Status unbekannt",
-};
-
 /* ----------------------------- CORS -------------------------------------- */
 
 const CORS = {
@@ -205,6 +176,14 @@ app.http("picqer-lookup", {
         status: 400,
         headers: CORS,
         jsonBody: { error: "Bitte Kundennummer und Bestellnummer angeben.", version: VERSION },
+      };
+    }
+
+    if (!PICQER_API_KEY) {
+      return {
+        status: 500,
+        headers: CORS,
+        jsonBody: { error: "Server-Konfigurationsfehler", version: VERSION },
       };
     }
 
@@ -293,42 +272,20 @@ app.http("picqer-lookup", {
 
       /* ── 4) picklist_status + picklist_status_nachricht ermitteln ───── */
 
-      const activeShipment = shipments.find((s) => !s.cancelled) || null;
-      const firstParcel = activeShipment?.parcels?.[0] || null;
+      const activeShipments = shipments.filter((s) => !s.cancelled);
+      const activeShipment = activeShipments[0] || null;
+      const allParcels = activeShipments.flatMap((s) => s.parcels || []);
+      const firstParcel = allParcels[0] || null;
       const pl = order.picklists?.[0] || null;
 
       const { picklistStatus, picklistStatusNachricht } = getPicklistStatus(
         order, pl, activeShipment, backorders, backorderDatum
       );
 
-      /* ── 5) DHL Tracking abrufen (nur wenn versendet + Sendungsnr.) ── */
+      /* ── 5) Multi-Paket-Variablen ermitteln ──────────────────────────── */
 
-      let dhlTracking: DhlTrackingResult = {
-        dhl_status: "",
-        dhl_status_code: "",
-        dhl_status_ort: "",
-        dhl_status_zeit: "",
-        dhl_lieferzeit: "",
-        dhl_letztes_event: "",
-        dhl_events: "",
-        dhl_verfuegbar: false,
-      };
-
-      let dhl_debug = "";
-
-      if (picklistStatus === "versendet" && firstParcel?.tracking_code) {
-        try {
-          dhlTracking = await fetchDhlTracking(
-            firstParcel.tracking_code,
-            order.deliveryzipcode
-          );
-          dhl_debug = dhlTracking.dhl_verfuegbar ? "OK" : "Keine Daten von DHL";
-        } catch (err: any) {
-          dhl_debug = `DHL Fehler: ${err?.message || String(err)}`;
-        }
-      } else {
-        dhl_debug = `Kein DHL-Call: status=${picklistStatus}, tracking=${firstParcel?.tracking_code || "leer"}`;
-      }
+      const sendungsnummerAnzahl = allParcels.length;
+      const multiParcels = sendungsnummerAnzahl >= 2 ? allParcels.slice(0, 5) : [];
 
       /* ── 6) Response bauen ───────────────────────────────────────────── */
 
@@ -365,20 +322,22 @@ app.http("picqer-lookup", {
           produkte_gesamt:            pl?.totalproducts ?? "",
           picklist_abgeschlossen:     pl?.closed_at ? formatDate(pl.closed_at) : "",
           versanddienstleister:       activeShipment?.public_providername || activeShipment?.providername || activeShipment?.provider || "",
-          sendungsnummer:             firstParcel?.tracking_code || "",
-          tracking_link:              firstParcel?.tracking_url || "",
+          sendungsnummer_anzahl:      sendungsnummerAnzahl,
+          sendungsnummer:             sendungsnummerAnzahl === 1 ? (firstParcel?.tracking_code || "") : "",
+          tracking_link:              sendungsnummerAnzahl === 1 ? (firstParcel?.tracking_url || "") : "",
+          multi_sendungsnummer_1:     multiParcels[0]?.tracking_code || "",
+          multi_tracking_1:           multiParcels[0]?.tracking_url || "",
+          multi_sendungsnummer_2:     multiParcels[1]?.tracking_code || "",
+          multi_tracking_2:           multiParcels[1]?.tracking_url || "",
+          multi_sendungsnummer_3:     multiParcels[2]?.tracking_code || "",
+          multi_tracking_3:           multiParcels[2]?.tracking_url || "",
+          multi_sendungsnummer_4:     multiParcels[3]?.tracking_code || "",
+          multi_tracking_4:           multiParcels[3]?.tracking_url || "",
+          multi_sendungsnummer_5:     multiParcels[4]?.tracking_code || "",
+          multi_tracking_5:           multiParcels[4]?.tracking_url || "",
           versendet_am:               activeShipment ? formatDate(activeShipment.created) : "",
           gewicht:                    activeShipment?.weight ? `${activeShipment.weight}g` : "",
           versand_storniert:          activeShipment?.cancelled ?? false,
-          dhl_status:                 dhlTracking.dhl_status,
-          dhl_status_code:            dhlTracking.dhl_status_code,
-          dhl_status_ort:             dhlTracking.dhl_status_ort,
-          dhl_status_zeit:            dhlTracking.dhl_status_zeit,
-          dhl_lieferzeit:             dhlTracking.dhl_lieferzeit,
-          dhl_letztes_event:          dhlTracking.dhl_letztes_event,
-          dhl_events:                 dhlTracking.dhl_events,
-          dhl_verfuegbar:             dhlTracking.dhl_verfuegbar,
-          dhl_debug:                  dhl_debug,
           backorder_vorhanden:        backorders.length > 0,
           backorder_anzahl:           backorders.length,
           backorder_datum:            backorderDatum,
@@ -396,89 +355,6 @@ app.http("picqer-lookup", {
     }
   },
 });
-
-/* ──────────────────── DHL Tracking API ──────────────────────────────────── */
-
-async function fetchDhlTracking(
-  trackingCode: string,
-  recipientPostalCode?: string
-): Promise<DhlTrackingResult> {
-  const empty: DhlTrackingResult = {
-    dhl_status: "",
-    dhl_status_code: "",
-    dhl_status_ort: "",
-    dhl_status_zeit: "",
-    dhl_lieferzeit: "",
-    dhl_letztes_event: "",
-    dhl_events: "",
-    dhl_verfuegbar: false,
-  };
-
-  let url = `${DHL_API_BASE}?trackingNumber=${encodeURIComponent(trackingCode)}&language=de`;
-  if (recipientPostalCode) {
-    url += `&recipientPostalCode=${encodeURIComponent(recipientPostalCode)}`;
-  }
-
-  const resp = await fetch(url, {
-    method: "GET",
-    headers: {
-      "DHL-API-Key": DHL_API_KEY,
-      Accept: "application/json",
-    },
-  });
-
-  if (!resp.ok) {
-    const errorText = await resp.text();
-    throw new Error(`DHL API ${resp.status}: ${errorText.substring(0, 200)}`);
-  }
-
-  const data = (await resp.json()) as any;
-  const shipment = data?.shipments?.[0];
-
-  if (!shipment) {
-    return empty;
-  }
-
-  const statusCode = shipment.status?.statusCode || "";
-  const statusLabel = DHL_STATUS_MAP[statusCode] || shipment.status?.status || statusCode;
-  const statusDescription = shipment.status?.description || shipment.status?.status || "";
-  const statusOrt = shipment.status?.location?.address?.addressLocality || "";
-  const statusZeit = shipment.status?.timestamp
-    ? formatDate(shipment.status.timestamp)
-    : "";
-
-  let lieferzeit = "";
-  if (shipment.estimatedTimeOfDelivery?.date) {
-    lieferzeit = formatDateShort(shipment.estimatedTimeOfDelivery.date);
-    if (shipment.estimatedTimeOfDelivery.estimatedTimeOfDeliveryRemark) {
-      lieferzeit += ` (${shipment.estimatedTimeOfDelivery.estimatedTimeOfDeliveryRemark})`;
-    }
-  }
-
-  let eventsText = "";
-  if (Array.isArray(shipment.events) && shipment.events.length > 0) {
-    const recentEvents = shipment.events.slice(0, 5);
-    eventsText = recentEvents
-      .map((ev: any) => {
-        const zeit = ev.timestamp ? formatDate(ev.timestamp) : "";
-        const ort = ev.location?.address?.addressLocality || "";
-        const beschreibung = ev.description || ev.status || "";
-        return `${zeit}${ort ? ` – ${ort}` : ""}: ${beschreibung}`;
-      })
-      .join("\n");
-  }
-
-  return {
-    dhl_status: statusLabel,
-    dhl_status_code: statusCode,
-    dhl_status_ort: statusOrt,
-    dhl_status_zeit: statusZeit,
-    dhl_lieferzeit: lieferzeit,
-    dhl_letztes_event: statusDescription,
-    dhl_events: eventsText,
-    dhl_verfuegbar: true,
-  };
-}
 
 /* ──────────── picklist_status + picklist_status_nachricht ─────────────── */
 
