@@ -1,32 +1,12 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 
-const VERSION = "picqer-lookup-azure-v2";
+const VERSION = "picqer-lookup-azure-v3";
 
-/* ────────────────────────── Shop-Konfiguration ─────────────────────────── */
+/* ────────────────────────── Picqer-Konfiguration ───────────────────────── */
 
-type ShopConfig = {
-  apiKey: string;
-  subdomain: string;
-  label: string;
-};
-
-function getShopConfig(code: string): ShopConfig | null {
-  const shopsFromEnv = process.env.PICQER_SHOPS_JSON
-    ? (JSON.parse(process.env.PICQER_SHOPS_JSON) as Record<string, ShopConfig>)
-    : null;
-
-  const shopMap = shopsFromEnv && Object.keys(shopsFromEnv).length > 0
-    ? shopsFromEnv
-    : {
-        "QY-2025": {
-          apiKey: process.env.PICQER_API_KEY || "",
-          subdomain: process.env.PICQER_SUBDOMAIN || "sellship",
-          label: process.env.PICQER_LABEL || "QYRA",
-        },
-      };
-
-  return shopMap[code.trim().toUpperCase()] || null;
-}
+const PICQER_API_KEY =
+  process.env.PICQER_API_KEY || "3HMQdsT8FiKlYuOJ5UmBbM1DcRyXb9WKQZ2d41nuKd1Dj82I";
+const PICQER_SUBDOMAIN = process.env.PICQER_SUBDOMAIN || "sellship";
 
 /**
  * DHL Tracking API Credentials
@@ -46,6 +26,7 @@ type PicqerOrder = {
   idorder: number;
   orderid: string;
   reference: string | null;
+  idfulfilment_customer: number | null;
   status: string;
   deliveryname: string;
   deliveryzipcode: string;
@@ -216,26 +197,14 @@ app.http("picqer-lookup", {
       return { status: 400, headers: CORS, jsonBody: { error: "Invalid JSON body" } };
     }
 
-    const code = body?.code?.trim().toUpperCase();
+    const idfulfilmentCustomer = body?.code?.trim();
     const bestellnummer = body?.bestellnummer?.trim();
 
-    if (!code || !bestellnummer) {
+    if (!idfulfilmentCustomer || !bestellnummer) {
       return {
         status: 400,
         headers: CORS,
-        jsonBody: { error: "Bitte Code und Bestellnummer angeben.", version: VERSION },
-      };
-    }
-
-    const shop = getShopConfig(code);
-    if (!shop) {
-      return {
-        status: 403,
-        headers: CORS,
-        jsonBody: {
-          message: `❌ Unbekannter Code: "${code}"\n\nBitte überprüfe deinen Shop-Code und versuche es erneut.`,
-          version: VERSION,
-        },
+        jsonBody: { error: "Bitte Kundennummer und Bestellnummer angeben.", version: VERSION },
       };
     }
 
@@ -245,14 +214,12 @@ app.http("picqer-lookup", {
       const reference = bestellnummer.startsWith("#") ? bestellnummer : `#${bestellnummer}`;
 
       let orders = await picqerGet<PicqerOrder[]>(
-        `/orders?reference=${encodeURIComponent(reference)}`,
-        shop
+        `/orders?reference=${encodeURIComponent(reference)}`
       );
 
       if (!orders || orders.length === 0) {
         orders = await picqerGet<PicqerOrder[]>(
-          `/orders?search=${encodeURIComponent(bestellnummer)}`,
-          shop
+          `/orders?search=${encodeURIComponent(bestellnummer)}`
         );
       }
 
@@ -269,6 +236,19 @@ app.http("picqer-lookup", {
 
       const order = orders[0];
 
+      /* ── 1b) Sicherheits-Doppelprüfung: gehört die Order zum angegebenen Kunden? ── */
+
+      if (String(order.idfulfilment_customer ?? "") !== idfulfilmentCustomer) {
+        return {
+          status: 404,
+          headers: CORS,
+          jsonBody: {
+            message: `🔍 Keine Bestellung mit der Nummer "${bestellnummer}" gefunden.\n\nBitte überprüfe die Nummer und versuche es erneut.`,
+            version: VERSION,
+          },
+        };
+      }
+
       /* ── 2) Shipments abrufen ────────────────────────────────────────── */
 
       let shipments: PicqerShipment[] = [];
@@ -277,8 +257,7 @@ app.http("picqer-lookup", {
         for (const pl of order.picklists) {
           try {
             const plShipments = await picqerGet<PicqerShipment[]>(
-              `/picklists/${pl.idpicklist}/shipments`,
-              shop
+              `/picklists/${pl.idpicklist}/shipments`
             );
             if (Array.isArray(plShipments)) {
               shipments.push(...plShipments);
@@ -296,8 +275,7 @@ app.http("picqer-lookup", {
 
       try {
         const boResult = await picqerGet<PicqerBackorder[]>(
-          `/orders/${order.idorder}/backorders`,
-          shop
+          `/orders/${order.idorder}/backorders`
         );
         if (Array.isArray(boResult) && boResult.length > 0) {
           backorders = boResult;
@@ -405,7 +383,7 @@ app.http("picqer-lookup", {
           backorder_anzahl:           backorders.length,
           backorder_datum:            backorderDatum,
           public_status_page:         order.public_status_page || "",
-          message:                    formatMessage(order, shipments, shop.label),
+          message:                    formatMessage(order, shipments),
           version:                    VERSION,
         },
       };
@@ -559,12 +537,12 @@ function getPicklistStatus(
 
 /* ──────────────────── Zusammenfassende Message ─────────────────────────── */
 
-function formatMessage(order: PicqerOrder, shipments: PicqerShipment[], shopLabel: string): string {
+function formatMessage(order: PicqerOrder, shipments: PicqerShipment[]): string {
   const status = ORDER_STATUS[order.status] || order.status;
   const activeShipment = shipments.find((s) => !s.cancelled);
   const parcel = activeShipment?.parcels?.[0];
 
-  let msg = `📦 Bestellung ${order.reference || order.orderid} (${shopLabel})\n`;
+  let msg = `📦 Bestellung ${order.reference || order.orderid}\n`;
   msg += `Status: ${status}\n`;
   msg += `Empfänger: ${order.deliveryname}, ${order.deliveryzipcode} ${order.deliverycity}`;
 
@@ -578,12 +556,12 @@ function formatMessage(order: PicqerOrder, shipments: PicqerShipment[], shopLabe
 
 /* ──────────────────────── Picqer API Helper ────────────────────────────── */
 
-async function picqerGet<T>(endpoint: string, shop: ShopConfig): Promise<T> {
-  const url = `https://${shop.subdomain}.picqer.com/api/v1${endpoint}`;
+async function picqerGet<T>(endpoint: string): Promise<T> {
+  const url = `https://${PICQER_SUBDOMAIN}.picqer.com/api/v1${endpoint}`;
   const resp = await fetch(url, {
     method: "GET",
     headers: {
-      Authorization: "Basic " + Buffer.from(shop.apiKey + ":").toString("base64"),
+      Authorization: "Basic " + Buffer.from(PICQER_API_KEY + ":").toString("base64"),
       "User-Agent": "SellshipMiddleware",
       Accept: "application/json",
     },
